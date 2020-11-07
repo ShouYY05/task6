@@ -1,65 +1,115 @@
+import cifar10, cifar10_input
 import tensorflow as tf
 import numpy as np
-IMAGE_SIZE=32#每张图片分辨率
-NUM_CHANNELS=3#输入图片通道数
-vCONV_SIZE=3
-vCONV_KERNEL_NUM=[None,16,32,64,128,128]
-vFC_SIZE_1=100
-vFC_SIZE_2=40
-def get_weight(shape,regularizer):#带有正则化
-    w=tf.Variable(tf.random_normal(shape=shape,stddev=0.1),dtype=tf.float32)
-    if regularizer!=None :
-        tf.add_to_collection('losses', tf.contrib.layers.l2_regularizer(regularizer)(w))
-    return w
-def get_bias(shape):
-    b=tf.Variable(tf.zeros(shape=shape))
-    return b
-def conv2d(x,w):
-    return tf.nn.conv2d(x,w,strides=[1,1,1,1],padding="SAME")
-  
-def max_pool_2x2_pad0(x):
-    return tf.nn.max_pool(x, ksize=[1, 2, 2, 1], strides=[1, 2, 2, 1], padding="VALID")
-#前向传播
-def con_relu(x,index_ceng=int,regularizer=float,conv_time=int):
-    conv=x
-    for i in range(conv_time):
-        shape_x=int(np.shape(conv)[-1])
-        conv_w = get_weight(shape=(vCONV_SIZE, vCONV_SIZE,shape_x, vCONV_KERNEL_NUM[index_ceng]), regularizer=regularizer)
-        conv_b = get_bias(shape=vCONV_KERNEL_NUM[index_ceng])
-        conv=conv2d(conv,conv_w)
-        conv=tf.nn.relu(tf.nn.bias_add(conv,conv_b))
-    return conv
-def forward(x,train,regularizer):
-    conv1=con_relu(x,index_ceng=1,regularizer=regularizer,conv_time=1)
-    pool1=max_pool_2x2_pad0(conv1)
-
-    conv2=con_relu(pool1,index_ceng=2,regularizer=regularizer,conv_time=1)
-    pool2=max_pool_2x2_pad0(conv2)
-
-    conv3=con_relu(pool2,index_ceng=3,regularizer=regularizer,conv_time=2)
-    pool3 = max_pool_2x2_pad0(conv3)
-
-    conv4 = con_relu(pool3, index_ceng=4, regularizer=regularizer,conv_time=2)
-    pool4 = max_pool_2x2_pad0(conv4)
-
-    conv5 = con_relu(pool4, index_ceng=5, regularizer=regularizer,conv_time=2)
-    pool5 = max_pool_2x2_pad0(conv5)
-
-    pool_shape = pool5.get_shape().as_list()
-    nodes = pool_shape[1] * pool_shape[2] * pool_shape[3]  # 从 list 中依次取出矩阵的长宽及深度，并求三者的乘积，得到矩阵被拉长后的长度
-    reshaped_x = tf.reshape(pool5, [pool_shape[0], nodes])  # 将 pool2 转换为一个 batch 的向量再传入后续的全连接
-
-    fc1_w = get_weight([nodes, vFC_SIZE_1], regularizer)
-    fc1_b = get_bias([vFC_SIZE_1])
-    fc1 = tf.nn.relu(tf.matmul(reshaped_x, fc1_w) + fc1_b)
-    if train: fc1 = tf.nn.dropout(fc1, 0.5)
-
-    fc2_w = get_weight([vFC_SIZE_1, vFC_SIZE_2], regularizer)
-    fc2_b = get_bias([vFC_SIZE_2])
-    fc2 = tf.nn.relu(tf.matmul(fc1, fc2_w) + fc2_b)
-    if train: fc2 = tf.nn.dropout(fc2, 0.5)
-
-    fc3_w = get_weight([vFC_SIZE_2, OUTPUT_NOOD], regularizer)
-    fc3_b = get_bias(OUTPUT_NOOD)
-    y = tf.matmul(fc2, fc3_w) + fc3_b
-    return y
+import time
+ 
+max_steps = 3000 # 最大迭代轮数
+batch_size = 128 # 批大小
+data_dir = 'cifar10_data/cifar-10-batches-bin'
+ 
+# 初始化weight函数，通过wl参数控制L2正则化大小
+def variable_with_weight_loss(shape, stddev, wl):
+    var = tf.Variable(tf.truncated_normal(shape, stddev=stddev))
+    if wl is not None:
+        weight_loss = tf.multiply(tf.nn.l2_loss(var), wl, name='weight_loss')
+        tf.add_to_collection('losses', weight_loss)
+    return var
+ 
+cifar10.maybe_download_and_extract()
+images_train, labels_train = cifar10_input.distorted_inputs(data_dir=data_dir,
+                                                            batch_size=batch_size)
+# 裁剪图片正中间的24*24大小的区块并进行数据标准化操作
+images_test, labels_test = cifar10_input.inputs(eval_data=True,
+                                                data_dir=data_dir,
+                                                batch_size=batch_size)
+ 
+# 定义placeholder
+image_holder = tf.placeholder(tf.float32, [batch_size, 24, 24, 3])
+label_holder = tf.placeholder(tf.int32, [batch_size])
+ 
+# 卷积层1，不对权重进行正则化
+weight1 = variable_with_weight_loss([5, 5, 3, 64], stddev=5e-2, wl=0.0) # 0.05
+kernel1 = tf.nn.conv2d(image_holder, weight1,
+                       strides=[1, 1, 1, 1], padding='SAME')
+bias1 = tf.Variable(tf.constant(0.0, shape=[64]))
+conv1 = tf.nn.relu(tf.nn.bias_add(kernel1, bias1))
+pool1 = tf.nn.max_pool(conv1, ksize=[1, 3, 3, 1],
+                       strides=[1, 2, 2, 1], padding='SAME')
+norm1 = tf.nn.lrn(pool1, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75)
+ 
+# 卷积层2
+weight2 = variable_with_weight_loss([5, 5, 64, 64], stddev=5e-2, wl=0.0)
+kernel2 = tf.nn.conv2d(norm1, weight2, strides=[1, 1, 1, 1], padding='SAME')
+bias2 = tf.Variable(tf.constant(0.1, shape=[64]))
+conv2 = tf.nn.relu(tf.nn.bias_add(kernel2, bias2))
+norm2 = tf.nn.lrn(conv2, 4, bias=1.0, alpha=0.001 / 9.0, beta=0.75)
+pool2 = tf.nn.max_pool(norm2, ksize=[1, 3, 3, 1],
+                       strides=[1, 2, 2, 1], padding='SAME')
+ 
+# 全连接层3
+reshape = tf.reshape(pool2, [batch_size, -1]) # 将每个样本reshape为一维向量
+dim = reshape.get_shape()[1].value # 取每个样本的长度
+weight3 = variable_with_weight_loss([dim, 384], stddev=0.04, wl=0.004)
+bias3 = tf.Variable(tf.constant(0.1, shape=[384]))
+local3 = tf.nn.relu(tf.matmul(reshape, weight3) + bias3)
+ 
+# 全连接层4
+weight4 = variable_with_weight_loss([384, 192], stddev=0.04, wl=0.004)
+bias4 = tf.Variable(tf.constant(0.1, shape=[192]))
+local4 = tf.nn.relu(tf.matmul(local3, weight4) + bias4)
+ 
+# 全连接层5
+weight5 = variable_with_weight_loss([192, 10], stddev=1 / 192.0, wl=0.0)
+bias5 = tf.Variable(tf.constant(0.0, shape=[10]))
+logits = tf.matmul(local4, weight5) + bias5
+ 
+# 定义损失函数loss
+def loss(logits, labels):
+    labels = tf.cast(labels, tf.int64)
+    cross_entropy = tf.nn.sparse_softmax_cross_entropy_with_logits(
+            logits=logits, labels=labels, name='cross_entropy_per_example')
+    cross_entropy_mean = tf.reduce_mean(cross_entropy, name='cross_entropy')
+    tf.add_to_collection('losses', cross_entropy_mean)
+    return tf.add_n(tf.get_collection('losses'), name='total_loss')
+ 
+loss = loss(logits, label_holder) # 定义loss
+train_op = tf.train.AdamOptimizer(1e-3).minimize(loss) # 定义优化器
+top_k_op = tf.nn.in_top_k(logits, label_holder, 1)
+ 
+# 定义会话并开始迭代训练
+sess = tf.InteractiveSession()
+tf.global_variables_initializer().run()
+# 启动图片数据增强的线程队列
+tf.train.start_queue_runners()
+ 
+# 迭代训练
+for step in range(max_steps):
+    start_time = time.time()
+    image_batch, label_batch = sess.run([images_train, labels_train]) # 获取训练数据
+    _, loss_value = sess.run([train_op, loss],
+                             feed_dict={image_holder: image_batch,
+                                        label_holder: label_batch})
+    duration = time.time() - start_time # 计算每次迭代需要的时间
+    if step % 10 == 0:
+        examples_per_sec = batch_size / duration # 每秒处理的样本数
+        sec_per_batch = float(duration) # 每批需要的时间
+        format_str = ('step %d, loss=%.2f (%.1f examples/sec; %.3f sec/batch)')
+        print(format_str % (step, loss_value, examples_per_sec, sec_per_batch))
+ 
+# 在测试集上测评准确率
+num_examples = 10000
+import math
+num_iter = int(math.ceil(num_examples / batch_size))
+true_count = 0
+total_sample_count = num_iter * batch_size
+step = 0
+while step < num_iter:
+    image_batch, label_batch = sess.run([images_test, labels_test])
+    predictions = sess.run([top_k_op],
+                           feed_dict={image_holder: image_batch,
+                                      label_holder: label_batch})
+    true_count += np.sum(predictions)
+    step += 1
+ 
+precision = true_count / total_sample_count
+print('precision @ 1 =%.3f' % precision)
